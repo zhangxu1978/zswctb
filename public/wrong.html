@@ -1,0 +1,98 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考试系统 - 错题本</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="topnav no-print">
+  <a class="brand" href="/">考试系统</a>
+  <a href="/">首页</a>
+  <a href="/bank.html">题库</a>
+  <a href="/create.html">AI 组卷</a>
+  <a href="/history.html">考试历史</a>
+  <a href="/wrong.html" class="active">错题本</a>
+</nav>
+<div class="container narrow">
+  <h1 class="page-title">错题本</h1>
+  <p class="page-sub">勾选错题，AI 将参考原题生成同类变式题，组成一套新的练习卷</p>
+
+  <div class="card" id="toolbar" style="display:none;">
+    <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+      <label><input type="checkbox" id="checkAll" onchange="toggleAll()"> 全选</label>
+      <span>每道错题出</span>
+      <select id="perQ">
+        <option value="1" selected>1</option><option value="2">2</option><option value="3">3</option>
+      </select>
+      <span>道类似题</span>
+      <span style="flex:1;"></span>
+      <button class="btn primary" id="genBtn" onclick="genSimilar()">AI 出类似题练习</button>
+    </div>
+  </div>
+
+  <div class="card" id="listCard">
+    <div id="list"></div>
+    <div class="empty-tip" id="emptyTip" style="display:none;">太棒了，还没有错题记录！</div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script>
+async function load() {
+  const items = await api('/wrongbook');
+  document.getElementById('emptyTip').style.display = items.length ? 'none' : 'block';
+  document.getElementById('toolbar').style.display = items.length ? 'block' : 'none';
+  document.getElementById('list').innerHTML = items.map(w => `
+    <div class="wrong-item">
+      <input type="checkbox" class="pick" value="${w.id}">
+      <div class="body">
+        <div class="stem">
+          <span class="badge red">错 ${w.wrongCount} 次</span>
+          <span class="badge blue">${esc(w.typeLabel)}</span>
+          <span class="badge gray">${esc(w.subject)}</span>
+          ${esc(w.content)}
+        </div>
+        ${w.options ? `<div style="color:#556;font-size:13px;margin-top:3px;">${w.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${esc(o)}`).join('　')}</div>` : ''}
+        <div class="meta">
+          我的答案：<b style="color:#b3261e;">${esc(w.myAnswer)}</b>
+          　正确答案：<b style="color:#1d7a43;">${esc(w.referenceAnswer)}</b>
+        </div>
+        ${w.reason ? `<div class="meta">评语：${esc(w.reason)}</div>` : ''}
+        <div class="meta">来源：${esc(w.sourcePaper)}　最近错误：${esc(w.lastWrongAt || '')}</div>
+      </div>
+    </div>`).join('');
+}
+
+function toggleAll() {
+  const on = document.getElementById('checkAll').checked;
+  document.querySelectorAll('.pick').forEach(c => c.checked = on);
+}
+
+async function genSimilar() {
+  const ids = [...document.querySelectorAll('.pick:checked')].map(c => Number(c.value));
+  if (!ids.length) return toast('请先勾选错题', true);
+  const btn = document.getElementById('genBtn');
+  btn.disabled = true;
+  btn.textContent = 'AI 出题中…';
+  try {
+    const r = await api('/practice/similar', {
+      method: 'POST',
+      body: { ids, perQuestion: Number(document.getElementById('perQ').value) || 1 }
+    });
+    if (confirm(`已生成练习卷：${r.questionCount} 题、${r.totalScore} 分。\n立即开始答题？`)) {
+      location.href = '/exam/' + r.paperId;
+    } else {
+      toast('练习卷地址：' + r.url);
+      btn.disabled = false; btn.textContent = 'AI 出类似题练习';
+    }
+  } catch (e) {
+    toast(e.message, true);
+    btn.disabled = false; btn.textContent = 'AI 出类似题练习';
+  }
+}
+
+load().catch(e => toast(e.message, true));
+</script>
+</body>
+</html>

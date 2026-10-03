@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>试卷答题 - 考试系统</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="topnav no-print">
+  <a class="brand" href="/">考试系统</a>
+  <a href="/">首页</a>
+  <a href="/bank.html">题库</a>
+  <a href="/create.html">AI 组卷</a>
+  <a href="/history.html">考试历史</a>
+  <a href="/wrong.html">错题本</a>
+</nav>
+<div class="container">
+  <div class="export-bar no-print">
+    <button class="btn sm" onclick="openPreview()">预览 / 导出 PDF</button>
+  </div>
+
+  <div id="doneBanner" class="wait-banner" style="display:none;"></div>
+
+  <div class="start-panel no-print" id="startPanel" style="display:none;">
+    <h2 style="margin:0 0 6px;" id="spTitle">准备开始考试</h2>
+    <div class="tip" id="spTip"></div>
+    <div style="margin-bottom:12px;">
+      <label style="margin-right:8px;">请先在试卷上写下你的名字：</label>
+      <span id="spNameErr" style="color:#b3261e;display:none;font-size:13px;">请先写名字</span>
+    </div>
+    <button class="btn success" id="startBtn" style="font-size:16px;padding:10px 36px;" onclick="startExam()">开始考试</button>
+    <div class="tip" style="margin-top:10px;">点击后开始计时，计时期间请勿刷新离开页面（刷新可恢复作答）</div>
+  </div>
+
+  <div class="exam-bar no-print" id="examBar" style="display:none;">
+    <span class="timer" id="elapsed">00:00</span>
+    <span class="timer" id="countdown" style="display:none;"></span>
+    <span style="flex:1;"></span>
+    <button class="btn ghost sm" onclick="window.print()">打印试卷</button>
+    <button class="btn danger" id="submitBtn" onclick="submitExam()">交卷</button>
+  </div>
+
+  <div class="paper" id="paper">
+    <div class="paper-head">
+      <h1 id="pTitle">试卷加载中…</h1>
+      <div class="meta" id="pMeta"></div>
+    </div>
+    <div class="name-line">
+      姓名：<input type="text" id="nameInput" class="screen-only-input" maxlength="20" placeholder="">
+      <span class="print-answer" id="namePrint"></span>
+    </div>
+    <div id="qArea"></div>
+    <div class="empty-tip" id="emptyPaper" style="display:none;">该试卷暂无题目</div>
+  </div>
+</div>
+
+<div class="pv-mask" id="pvMask">
+  <div class="pv-toolbar no-print">
+    <span style="font-weight:700;">预览</span>
+    <button class="btn sm" id="pvMinus" onclick="pvStepScale(-1)">－</button>
+    <select id="pvScaleSel" onchange="pvSetScale(this.value)">
+      <option value="0.5">50%</option>
+      <option value="0.75">75%</option>
+      <option value="1" selected>100%</option>
+      <option value="1.25">125%</option>
+      <option value="1.5">150%</option>
+      <option value="2">200%</option>
+    </select>
+    <button class="btn sm" id="pvPlus" onclick="pvStepScale(1)">＋</button>
+    <label style="display:inline-flex;align-items:center;gap:5px;margin-left:8px;cursor:pointer;">
+      <input type="checkbox" id="pvAns" onchange="rebuildPreview()"> 包含作答答案
+    </label>
+    <span style="flex:1;"></span>
+    <button class="btn primary sm" id="pvExportBtn" onclick="exportPDF()">导出 PDF</button>
+    <button class="btn sm ghost" onclick="closePreview()">关闭</button>
+  </div>
+  <div class="pv-viewport" id="pvViewport">
+    <div id="pvWrap" style="margin:0 auto;">
+      <div id="pvScaler"></div>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script src="/vendor/html2canvas.min.js"></script>
+<script src="/vendor/jspdf.umd.min.js"></script>
+<script>
+const paperId = decodeURIComponent(location.pathname.split('/').pop());
+const draftKey = 'exam_draft_' + paperId;
+
+let paper, questions, exam, examId = null;
+let started = false, submitting = false, autoSubmitted = false;
+let startedAtMs = null, durationSec = 0;
+let answers = {}, times = {};
+const visibleQids = new Set();
+let tickCount = 0, tickTimer = null;
+
+const $ = (id) => document.getElementById(id);
+
+async function init() {
+  const data = await api('/papers/' + encodeURIComponent(paperId));
+  paper = data.paper;
+  questions = sortQuestions(data.questions);
+  exam = data.exam;
+
+  $('pTitle').textContent = paper.title;
+  $('pMeta').textContent = [
+    paper.subject ? '科目：' + paper.subject : '',
+    '满分：' + paper.total_score + ' 分',
+    paper.duration_minutes ? '时长：' + paper.duration_minutes + ' 分钟' : '',
+    '共 ' + questions.length + ' 题'
+  ].filter(Boolean).join('　　');
+  document.title = paper.title;
+
+  if (!questions.length) { $('emptyPaper').style.display = 'block'; return; }
+  renderQuestions();
+
+  const done = paper.status === 'completed' || paper.status === 'graded';
+  if (done) {
+    const name = exam ? exam.student_name : '';
+    $('nameInput').value = name; $('namePrint').textContent = name;
+    $('nameInput').disabled = true;
+    disableInputs();
+    $('doneBanner').style.display = 'block';
+    $('doneBanner').innerHTML = exam
+      ? `本试卷状态：<b>${paper.statusZh}</b>${exam.total_score != null ? '，得分 <b>' + exam.total_score + '</b> / ' + paper.total_score : ''}。
+         <a href="/result/${exam.id}">查看判卷结果</a>
+         <button class="btn sm success" onclick="retakeExam()">重新考试</button>`
+      : `本试卷状态：<b>${paper.statusZh}</b>
+         <button class="btn sm success" onclick="retakeExam()">重新考试</button>`;
+    if (exam && exam.total_score != null) $('namePrint').textContent = name;
+    // 回填服务端保存的作答，供「包含作答答案」预览/导出使用
+    if (exam) {
+      try {
+        const detail = await api('/exams/' + encodeURIComponent(exam.id));
+        (detail.items || []).forEach(it => {
+          if (it.studentAnswer != null) answers[it.questionId] = it.studentAnswer;
+        });
+        for (const q of questions) updatePrintAnswer(q.snapshot.id);
+      } catch (_) { /* ignore */ }
+    }
+    return;
+  }
+
+  if (exam && exam.status === 'ongoing') {
+    resumeExam(false);
+  } else {
+    // 全新开考
+    disableInputs();
+    $('startPanel').style.display = 'block';
+    $('spTitle').textContent = paper.title;
+    $('spTip').textContent = `${paper.subject || ''} 满分 ${paper.total_score} 分，共 ${questions.length} 题` +
+      (paper.duration_minutes ? `，限时 ${paper.duration_minutes} 分钟` : '，不限时');
+  }
+}
+
+// ---------- 渲染 ----------
+function renderQuestions() {
+  let no = 0, lastType = null, html = '';
+  for (const q of questions) {
+    const s = q.snapshot;
+    if (s.type !== lastType) {
+      const group = questions.filter(x => x.snapshot.type === s.type);
+      const each = [...new Set(group.map(x => x.score))];
+      const scoreDesc = each.length === 1 ? `每题 ${each[0]} 分` : '分值见各题';
+      html += `<div class="sect-title">${cnNum(TYPE_ORDER.indexOf(s.type) + 1)}、${TYPE_LABEL[s.type]}（${scoreDesc}，共 ${group.length} 题）</div>`;
+      lastType = s.type;
+    }
+    no++;
+    html += renderQ(s, no, q.score);
+  }
+  $('qArea').innerHTML = html;
+  bindEvents();
+  observeQuestions();
+}
+
+function cnNum(n) { return '一二三四五六七八九十'[n - 1] || n; }
+
+function renderQ(s, no, score) {
+  let body = '';
+  if (s.type === 'single' || s.type === 'multiple') {
+    const ipt = s.type === 'single' ? 'radio' : 'checkbox';
+    body += `<ul class="opts">` + (s.options || []).map((o, i) => {
+      const L = String.fromCharCode(65 + i);
+      return `<li><label class="opt-label" data-qid="${s.id}" data-val="${L}">
+        <input type="${ipt}" name="q_${s.id}" value="${L}"><span class="opt-letter">${L}.</span> ${esc(o)}</label></li>`;
+    }).join('') + `</ul>`;
+  } else if (s.type === 'judge') {
+    body += `<div class="judge-group">
+      <button type="button" class="judge-btn" data-qid="${s.id}" data-val="对">对</button>
+      <button type="button" class="judge-btn" data-qid="${s.id}" data-val="错">错</button></div>`;
+  } else if (s.type === 'fill') {
+    const blanks = Math.max((String(s.content).match(/_{2,}/g) || []).length, (s.answer || []).length) || 1;
+    const parts = esc(s.content).split(/(?:_{2,})/g);
+    body += `<div class="stem-text">`;
+    for (let i = 0; i < blanks; i++) {
+      body += (parts[i] || '') + `<input type="text" class="fill-input" data-qid="${s.id}" data-blank="${i}">`;
+    }
+    body += (parts[blanks] || '') + `</div>`;
+  } else if (s.type === 'qa') {
+    body += `<textarea class="ans-area" data-qid="${s.id}" rows="4" placeholder="在此作答…"></textarea>`;
+  } else if (s.type === 'writing') {
+    body += `<textarea class="ans-area lined" data-qid="${s.id}" rows="10" placeholder="在此作答…"></textarea>
+      <div class="word-count" data-count="${s.id}">0 字</div>`;
+  }
+  return `<div class="q" id="q_${s.id}" data-qid="${s.id}">
+    <div class="stem"><span class="qno">${no}.</span>${esc(s.content)}
+      <span class="qscore">（${score} 分）</span></div>
+    ${body}
+    <div class="print-answer" id="pa_${s.id}"></div>
+  </div>`;
+}
+
+function observeQuestions() {
+  const io = new IntersectionObserver((entries) => {
+    for (const en of entries) {
+      const qid = en.target.dataset.qid;
+      if (en.isIntersecting) visibleQids.add(qid); else visibleQids.delete(qid);
+    }
+  }, { threshold: 0.35 });
+  document.querySelectorAll('.q').forEach(el => io.observe(el));
+}
+
+// ---------- 事件 ----------
+function bindEvents() {
+  const area = $('qArea');
+  area.addEventListener('click', (e) => {
+    const btn = e.target.closest('.judge-btn');
+    if (btn) {
+      const qid = btn.dataset.qid;
+      document.querySelectorAll(`.judge-btn[data-qid="${qid}"]`).forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      answers[qid] = btn.dataset.val;
+      updatePrintAnswer(qid);
+      saveDraft();
+    }
+  });
+  area.addEventListener('change', (e) => {
+    const t = e.target;
+    if (t.type === 'radio' || t.type === 'checkbox') {
+      const qid = t.name ? t.name.slice(2) : t.dataset.qid;
+      if (t.type === 'radio') answers[qid] = t.value;
+      else answers[qid] = [...document.querySelectorAll(`input[name="q_${qid}"]:checked`)].map(c => c.value);
+      document.querySelectorAll(`.opt-label[data-qid="${qid}"]`).forEach(l =>
+        l.classList.toggle('checked', l.querySelector('input').checked));
+      updatePrintAnswer(qid); saveDraft();
+    }
+  });
+  area.addEventListener('input', (e) => {
+    const t = e.target;
+    if (t.classList.contains('fill-input')) {
+      const qid = t.dataset.qid;
+      const inputs = [...document.querySelectorAll(`.fill-input[data-qid="${qid}"]`)];
+      answers[qid] = inputs.map(i => i.value);
+      updatePrintAnswer(qid); saveDraft();
+    } else if (t.classList.contains('ans-area')) {
+      const qid = t.dataset.qid;
+      answers[qid] = t.value;
+      const wc = document.querySelector(`[data-count="${qid}"]`);
+      if (wc) wc.textContent = (t.value.replace(/\s/g, '').length) + ' 字';
+      updatePrintAnswer(qid); saveDraft();
+    }
+  });
+  $('nameInput').addEventListener('input', () => {
+    $('namePrint').textContent = $('nameInput').value;
+    saveDraft();
+  });
+}
+
+function updatePrintAnswer(qid) {
+  const q = questions.find(x => x.snapshot.id === qid);
+  if (!q) return;
+  const t = q.snapshot.type, a = answers[qid];
+  let text = '';
+  if (t === 'single' || t === 'judge') text = a ? String(a) : '';
+  else if (t === 'multiple') text = (a || []).join('、');
+  else if (t === 'fill') text = (a || []).map(x => x || '____').join('　');
+  else text = a || '';
+  $('pa_' + qid).textContent = text ? '答：' + text : '';
+}
+
+// ---------- 考试流程 ----------
+async function startExam() {
+  const name = $('nameInput').value.trim();
+  if (!name) { $('spNameErr').style.display = 'inline'; toast('请先在试卷上写下名字', true); return; }
+  $('spNameErr').style.display = 'none';
+  try {
+    const r = await api('/exams', { method: 'POST', body: { paperId, studentName: name } });
+    examId = r.exam.id;
+    resumeExam(true, r.exam);
+  } catch (e) { toast(e.message, true); }
+}
+
+// 重新考试：开启一次全新考试（历史成绩保留），并把页面重置到初始作答状态
+async function retakeExam() {
+  if (!confirm('重新考试将开始一次全新的作答，之前的考试历史仍会保留。确认重新考试？')) return;
+  try {
+    const r = await api('/exams', { method: 'POST', body: { paperId, studentName: $('nameInput').value.trim(), retake: true } });
+    localStorage.removeItem(draftKey);
+    resetForRetake(r.exam);
+    toast('已重新开始考试');
+  } catch (e) { toast(e.message, true); }
+}
+
+function resetForRetake(newExam) {
+  answers = {}; times = {};
+  autoSubmitted = false; submitting = false;
+  document.querySelectorAll('#qArea input[type="text"], #qArea textarea').forEach(el => { el.value = ''; });
+  document.querySelectorAll('#qArea input[type="radio"], #qArea input[type="checkbox"]').forEach(el => { el.checked = false; });
+  document.querySelectorAll('.judge-btn.on').forEach(b => b.classList.remove('on'));
+  document.querySelectorAll('.opt-label.checked').forEach(l => l.classList.remove('checked'));
+  document.querySelectorAll('.word-count').forEach(w => { w.textContent = '0 字'; });
+  document.querySelectorAll('#qArea .print-answer').forEach(p => { p.textContent = ''; });
+  $('doneBanner').style.display = 'none';
+  window.scrollTo(0, 0);
+  resumeExam(true, newExam);
+}
+
+function resumeExam(isFresh, examRow) {
+  exam = examRow || exam;
+  examId = exam.id;
+  startedAtMs = Date.parse(exam.started_at);
+  durationSec = (paper.duration_minutes || 0) * 60;
+  if (!isNaN(startedAtMs)) {
+    const elapsed = (Date.now() - startedAtMs) / 1000;
+    if (durationSec && elapsed >= durationSec) { autoSubmitted = true; }
+  }
+  $('nameInput').disabled = false;
+  $('nameInput').value = exam.student_name || '';
+  $('namePrint').textContent = exam.student_name || '';
+  $('startPanel').style.display = 'none';
+  $('examBar').style.display = 'flex';
+
+  // 恢复草稿
+  try {
+    const d = JSON.parse(localStorage.getItem(draftKey) || 'null');
+    if (d && d.examId === examId) {
+      answers = d.answers || {}; times = d.times || {};
+      applyDraft();
+    }
+  } catch (_) { /* ignore */ }
+
+  enableInputs();
+  started = !autoSubmitted;
+  startTimers();
+  if (autoSubmitted) {
+    toast('考试时间已到，请交卷', true);
+  }
+}
+
+function applyDraft() {
+  for (const q of questions) {
+    const s = q.snapshot, qid = s.id, a = answers[qid];
+    if (a == null) continue;
+    if (s.type === 'single') {
+      const r = document.querySelector(`input[name="q_${qid}"][value="${a}"]`); if (r) r.checked = true;
+    } else if (s.type === 'multiple') {
+      (Array.isArray(a) ? a : []).forEach(L => {
+        const c = document.querySelector(`input[name="q_${qid}"][value="${L}"]`); if (c) c.checked = true;
+      });
+    } else if (s.type === 'judge') {
+      document.querySelectorAll(`.judge-btn[data-qid="${qid}"]`).forEach(b =>
+        b.classList.toggle('on', b.dataset.val === a));
+    } else if (s.type === 'fill') {
+      const inputs = document.querySelectorAll(`.fill-input[data-qid="${qid}"]`);
+      (Array.isArray(a) ? a : []).forEach((v, i) => { if (inputs[i]) inputs[i].value = v; });
+    } else {
+      const t = document.querySelector(`.ans-area[data-qid="${qid}"]`);
+      if (t) { t.value = a; const wc = document.querySelector(`[data-count="${qid}"]`); if (wc) wc.textContent = a.replace(/\s/g, '').length + ' 字'; }
+    }
+    updatePrintAnswer(qid);
+  }
+}
+
+function saveDraft() {
+  if (!examId) return;
+  try {
+    localStorage.setItem(draftKey, JSON.stringify({ examId, answers, times }));
+  } catch (_) { /* ignore */ }
+}
+
+function startTimers() {
+  if (tickTimer) clearInterval(tickTimer);
+  tickTimer = setInterval(() => {
+    if (!startedAtMs) return;
+    const elapsed = Math.max(0, Math.round((Date.now() - startedAtMs) / 1000));
+    $('elapsed').textContent = '已用时 ' + fmtClock(elapsed);
+    if (durationSec) {
+      const remain = durationSec - elapsed;
+      $('countdown').style.display = 'inline';
+      $('countdown').textContent = '剩余 ' + fmtClock(remain);
+      $('countdown').className = 'timer' + (remain <= 300 ? ' warn' : '');
+      if (remain <= 0 && started && !autoSubmitted) {
+        autoSubmitted = true;
+        toast('考试时间到，自动交卷');
+        doSubmit(true);
+        return;
+      }
+    }
+    if (started && !document.hidden && !submitting) {
+      visibleQids.forEach(qid => { times[qid] = (times[qid] || 0) + 1; });
+    }
+    if (++tickCount % 5 === 0) saveDraft();
+  }, 1000);
+}
+
+function disableInputs() {
+  document.querySelectorAll('#qArea input, #qArea textarea, #qArea button').forEach(el => el.disabled = true);
+  document.querySelectorAll('.q').forEach(el => el.classList.add('disabled'));
+}
+function enableInputs() {
+  document.querySelectorAll('#qArea input, #qArea textarea, #qArea button').forEach(el => el.disabled = false);
+  document.querySelectorAll('.q').forEach(el => el.classList.remove('disabled'));
+}
+
+function collectAnswers() {
+  return questions.map(q => ({
+    questionId: q.snapshot.id,
+    answer: answers[q.snapshot.id] !== undefined ? answers[q.snapshot.id] : null,
+    timeSpent: times[q.snapshot.id] || 0
+  }));
+}
+
+async function submitExam() { doSubmit(false); }
+
+async function doSubmit(auto) {
+  if (submitting) return;
+  if (!auto && !confirm('确认交卷？交卷后不可修改')) return;
+  submitting = true;
+  $('submitBtn').disabled = true;
+  try {
+    const r = await api(`/exams/${examId}/submit`, { method: 'POST', body: { answers: collectAnswers() } });
+    localStorage.removeItem(draftKey);
+    if (r.graded) {
+      location.href = '/result/' + examId;
+    } else {
+      $('examBar').style.display = 'none';
+      $('doneBanner').style.display = 'block';
+      $('doneBanner').innerHTML = `试卷已提交，状态：<b>已完成答题</b>。该试卷由外部系统生成，将由外部 agent 通过 MCP 判卷。<a href="/result/${examId}">查看结果页</a>
+        <button class="btn sm success" onclick="retakeExam()">重新考试</button>`;
+      disableInputs();
+      started = false;
+    }
+  } catch (e) {
+    submitting = false;
+    $('submitBtn').disabled = false;
+    toast(e.message, true);
+  }
+}
+
+// ---------- 预览 / 导出 PDF ----------
+let pvScale = 1;
+
+function openPreview() {
+  if (!questions || !questions.length) { toast('该试卷暂无题目，无法预览', true); return; }
+  $('namePrint').textContent = $('nameInput').value;
+  $('pvMask').classList.add('show');
+  $('pvScaleSel').value = '1';
+  pvScale = 1;
+  rebuildPreview();
+  $('pvViewport').scrollTop = 0;
+}
+
+function closePreview() {
+  $('pvMask').classList.remove('show');
+}
+
+function rebuildPreview() {
+  const clone = $('paper').cloneNode(true);
+  clone.removeAttribute('id');
+  clone.style.margin = '0';
+  const withAns = $('pvAns').checked;
+  clone.classList.add(withAns ? 'export-with-answers' : 'export-blank');
+  if (!withAns) {
+    // 空白考卷模式：清空所有作答痕迹（答案模式输入控件由 CSS 隐藏、print-answer 显示文字版）
+    clone.querySelectorAll('input:not([type=checkbox]):not([type=radio])').forEach(i => { i.value = ''; });
+    clone.querySelectorAll('input[type=radio], input[type=checkbox]').forEach(i => { i.checked = false; });
+    clone.querySelectorAll('textarea').forEach(t => { t.value = ''; });
+    clone.querySelectorAll('.judge-btn.on').forEach(b => b.classList.remove('on'));
+    clone.querySelectorAll('.opt-label.checked').forEach(l => l.classList.remove('checked'));
+    clone.querySelectorAll('.word-count').forEach(w => { w.textContent = '0 字'; });
+  }
+  const scaler = $('pvScaler');
+  scaler.innerHTML = '';
+  scaler.appendChild(clone);
+  pvApplyScale();
+}
+
+function pvApplyScale() {
+  const wrap = $('pvWrap'), scaler = $('pvScaler');
+  const paperEl = scaler.firstElementChild;
+  if (!paperEl) return;
+  scaler.style.transform = 'scale(' + pvScale + ')';
+  const w = 794 * pvScale, h = paperEl.offsetHeight * pvScale;
+  wrap.style.width = w + 'px';
+  wrap.style.height = h + 'px';
+}
+
+function pvSetScale(v) {
+  pvScale = Math.min(2, Math.max(0.5, parseFloat(v) || 1));
+  $('pvScaleSel').value = String(pvScale);
+  pvApplyScale();
+}
+
+function pvStepScale(dir) {
+  // 在 50/75/100/125/150/200 档位间步进
+  const steps = [0.5, 0.75, 1, 1.25, 1.5, 2];
+  let i = steps.findIndex(s => s >= pvScale - 0.001);
+  if (i < 0) i = steps.length - 1;
+  i = Math.min(steps.length - 1, Math.max(0, i + dir));
+  pvSetScale(steps[i]);
+}
+
+async function exportPDF() {
+  const paperEl = $('pvScaler').firstElementChild;
+  if (!paperEl) { toast('请先打开预览', true); return; }
+  const withAns = $('pvAns').checked;
+  const btn = $('pvExportBtn');
+  btn.disabled = true;
+  const oldText = btn.textContent;
+  btn.textContent = '生成中…';
+  // 导出期间取消缩放，避免 transform 影响截图
+  const savedTransform = $('pvScaler').style.transform;
+  $('pvScaler').style.transform = 'none';
+  try {
+    const canvas = await html2canvas(paperEl, {
+      scale: 2,
+      backgroundColor: '#ffffff',
+      useCORS: true,
+      windowWidth: 794
+    });
+    const { jsPDF } = window.jspdf;
+    const pdf = new jsPDF('p', 'mm', 'a4');
+    const pageW = 210, pageH = 297;
+    const pageImgH = canvas.width * pageH / pageW; // 单页对应的图片高度
+    let y = 0, first = true;
+    while (y < canvas.height) {
+      const sliceH = Math.min(pageImgH, canvas.height - y);
+      const c = document.createElement('canvas');
+      c.width = canvas.width;
+      c.height = Math.ceil(sliceH);
+      const ctx = c.getContext('2d');
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, c.width, c.height);
+      ctx.drawImage(canvas, 0, y, canvas.width, sliceH, 0, 0, canvas.width, sliceH);
+      if (!first) pdf.addPage();
+      first = false;
+      pdf.addImage(c.toDataURL('image/jpeg', 0.92), 'JPEG', 0, 0, pageW, sliceH * pageW / canvas.width);
+      y += sliceH;
+    }
+    pdf.save((paper.title || '试卷') + (withAns ? '（含答案）' : '') + '.pdf');
+    toast('PDF 已导出');
+  } catch (e) {
+    toast('导出失败：' + e.message, true);
+  } finally {
+    $('pvScaler').style.transform = savedTransform;
+    btn.disabled = false;
+    btn.textContent = oldText;
+  }
+}
+
+init().catch(e => {
+  document.getElementById('pTitle').textContent = '试卷加载失败';
+  toast(e.message, true);
+});
+</script>
+</body>
+</html>

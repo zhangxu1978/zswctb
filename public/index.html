@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考试系统 - 首页</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="topnav no-print">
+  <a class="brand" href="/">考试系统</a>
+  <a href="/" class="active">首页</a>
+  <a href="/bank.html">题库</a>
+  <a href="/create.html">AI 组卷</a>
+  <a href="/history.html">考试历史</a>
+  <a href="/wrong.html">错题本</a>
+</nav>
+<div class="container">
+  <h1 class="page-title">总览</h1>
+  <p class="page-sub">题库管理、AI 组卷、在线答题与 MCP 判卷一体化</p>
+
+  <div class="stat-grid" id="stats"></div>
+
+  <div class="card">
+    <div style="display:flex;justify-content:space-between;align-items:center;">
+      <h2 style="font-size:17px;margin:0;">试卷列表</h2>
+      <a class="btn primary sm" href="/create.html">AI 生成新试卷</a>
+    </div>
+    <table class="table" style="margin-top:12px;">
+      <thead><tr>
+        <th>试卷标题</th><th>科目</th><th>题数</th><th>总分</th><th>来源</th><th>状态</th><th>创建时间</th><th style="width:190px;">操作</th>
+      </tr></thead>
+      <tbody id="paperRows"></tbody>
+    </table>
+    <div class="empty-tip" id="emptyTip" style="display:none;">还没有试卷，去「AI 组卷」生成一份吧</div>
+  </div>
+</div>
+<script src="/js/api.js"></script>
+<script>
+async function load() {
+  const s = await api('/stats');
+  document.getElementById('stats').innerHTML = `
+    <div class="stat-card"><div class="num">${s.questions}</div><div class="lbl">题库题目</div></div>
+    <div class="stat-card"><div class="num">${s.papers}</div><div class="lbl">试卷总数</div></div>
+    <div class="stat-card"><div class="num">${s.exams}</div><div class="lbl">考试次数</div></div>
+    <div class="stat-card"><div class="num">${s.graded}</div><div class="lbl">已判卷</div></div>
+    <div class="stat-card"><div class="num" style="font-size:15px;padding-top:8px;">${esc(s.driver || 'sqlite')}</div><div class="lbl">数据库驱动</div></div>`;
+
+  const list = await api('/papers');
+  const tbody = document.getElementById('paperRows');
+  document.getElementById('emptyTip').style.display = list.length ? 'none' : 'block';
+  tbody.innerHTML = list.map(p => {
+    const url = `${location.origin}/exam/${p.id}`;
+    return `<tr>
+      <td><a href="/exam/${p.id}">${esc(p.title)}</a></td>
+      <td>${esc(p.subject || '-')}</td>
+      <td>${p.questionCount}</td>
+      <td>${p.total_score}</td>
+      <td><span class="badge ${p.source === 'mcp' ? 'purple' : 'gray'}">${p.source === 'mcp' ? 'MCP' : 'Web'}</span></td>
+      <td>${statusBadge(p.status, p.statusZh)}</td>
+      <td style="color:#889;font-size:13px;">${esc(p.created_at || '')}</td>
+      <td>
+        <button class="btn sm" onclick="copyUrl('${p.id}')">复制地址</button>
+        <a class="btn sm ghost" href="/exam/${p.id}">打开</a>
+      </td>
+    </tr>`;
+  }).join('');
+  window.__urls = Object.fromEntries(list.map(p => [p.id, `${location.origin}/exam/${p.id}`]));
+}
+
+async function copyUrl(id) {
+  const url = (window.__urls || {})[id] || `${location.origin}/exam/${id}`;
+  try { await navigator.clipboard.writeText(url); toast('已复制：' + url); }
+  catch (_) {
+    const inp = document.createElement('input');
+    inp.value = url; document.body.appendChild(inp); inp.select();
+    document.execCommand('copy'); inp.remove();
+    toast('已复制：' + url);
+  }
+}
+
+load().catch(e => toast(e.message, true));
+</script>
+</body>
+</html>

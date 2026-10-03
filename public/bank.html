@@ -1,0 +1,254 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考试系统 - 题库</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="topnav no-print">
+  <a class="brand" href="/">考试系统</a>
+  <a href="/">首页</a>
+  <a href="/bank.html" class="active">题库</a>
+  <a href="/create.html">AI 组卷</a>
+  <a href="/history.html">考试历史</a>
+  <a href="/wrong.html">错题本</a>
+</nav>
+<div class="container">
+  <div style="display:flex;justify-content:space-between;align-items:center;">
+    <h1 class="page-title">题库管理</h1>
+    <button class="btn primary" onclick="openEditor()">新增题目</button>
+  </div>
+  <p class="page-sub">支持语数外各科：单选 / 多选 / 判断 / 填空 / 问答 / 写作</p>
+
+  <div class="card">
+    <div class="form-row">
+      <div class="field" style="max-width:150px;"><label>科目</label>
+        <select id="fSubject" onchange="load()"><option value="">全部</option>${''}</select>
+      </div>
+      <div class="field" style="max-width:150px;"><label>题型</label>
+        <select id="fType" onchange="load()"><option value="">全部</option></select>
+      </div>
+      <div class="field" style="flex:2;"><label>关键词</label>
+        <input type="text" id="fKeyword" placeholder="搜索题干 / 解析" onkeydown="if(event.key==='Enter')load()">
+      </div>
+      <div class="field" style="max-width:110px;"><label>&nbsp;</label>
+        <button class="btn" style="width:100%;" onclick="load()">搜索</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <table class="table">
+      <thead><tr><th>科目</th><th>题型</th><th style="width:42%;">题干</th><th>答案</th><th>分值</th><th>难度</th><th>来源</th><th style="width:120px;">操作</th></tr></thead>
+      <tbody id="rows"></tbody>
+    </table>
+    <div class="empty-tip" id="emptyTip" style="display:none;">题库为空，点击右上角「新增题目」</div>
+    <div style="text-align:center;margin-top:12px;" id="pager"></div>
+  </div>
+</div>
+
+<!-- 题目编辑弹窗 -->
+<div class="modal-mask" id="mask">
+  <div class="modal">
+    <h3 id="modalTitle">新增题目</h3>
+    <div class="form-row">
+      <div class="field" style="max-width:170px;"><label>科目 *</label>
+        <input type="text" id="eSubject" list="subjectList" placeholder="如：数学">
+        <datalist id="subjectList"></datalist>
+      </div>
+      <div class="field" style="max-width:170px;"><label>题型 *</label>
+        <select id="eType" onchange="onTypeChange()"></select>
+      </div>
+      <div class="field" style="max-width:110px;"><label>分值</label>
+        <input type="number" id="eScore" value="5" min="0.5" step="0.5">
+      </div>
+      <div class="field" style="max-width:110px;"><label>难度 1-5</label>
+        <input type="number" id="eDiff" value="3" min="1" max="5">
+      </div>
+    </div>
+    <div class="field"><label>题干 *</label>
+      <textarea id="eContent" rows="3" placeholder="填空题请用 ____ 表示空位"></textarea>
+    </div>
+    <div class="field" id="optField" style="display:none;"><label>选项（至少 2 个）</label>
+      <div id="optList"></div>
+      <button class="btn sm ghost" onclick="addOption()">+ 添加选项</button>
+    </div>
+    <div class="field" id="ansField"><label>答案 *</label>
+      <div id="ansEditor"></div>
+    </div>
+    <div class="field"><label>解析 / 评分要点</label>
+      <textarea id="eAnalysis" rows="2"></textarea>
+    </div>
+    <div style="text-align:right;">
+      <button class="btn ghost" onclick="closeEditor()">取消</button>
+      <button class="btn primary" onclick="saveQuestion()">保存</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+let page = 1, editId = null;
+
+// 初始化筛选项
+document.getElementById('fSubject').innerHTML = '<option value="">全部</option>' +
+  SUBJECTS.map(s => `<option>${s}</option>`).join('');
+document.getElementById('subjectList').innerHTML = SUBJECTS.map(s => `<option>${s}</option>`).join('');
+document.getElementById('fType').innerHTML = '<option value="">全部</option>' +
+  Object.entries(TYPE_LABEL).map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+document.getElementById('eType').innerHTML = Object.entries(TYPE_LABEL)
+  .map(([k, v]) => `<option value="${k}">${v}</option>`).join('');
+
+async function load() {
+  const params = new URLSearchParams();
+  if (fSubject.value) params.set('subject', fSubject.value);
+  if (fType.value) params.set('type', fType.value);
+  if (fKeyword.value.trim()) params.set('keyword', fKeyword.value.trim());
+  params.set('page', page); params.set('pageSize', 20);
+  const { total, items } = await api('/questions?' + params.toString());
+  document.getElementById('emptyTip').style.display = items.length ? 'none' : 'block';
+  document.getElementById('rows').innerHTML = items.map(q => `<tr>
+    <td>${esc(q.subject)}</td>
+    <td><span class="badge blue">${TYPE_LABEL[q.type]}</span></td>
+    <td title="${esc(q.content)}">${esc(q.content.length > 60 ? q.content.slice(0, 60) + '…' : q.content)}</td>
+    <td title="${esc(JSON.stringify(q.answer))}">${esc(fmtAnswer(q))}</td>
+    <td>${q.score}</td>
+    <td>${q.difficulty}</td>
+    <td><span class="badge gray">${esc(q.source)}</span></td>
+    <td>
+      <button class="btn sm" onclick='openEditor(${JSON.stringify(JSON.stringify(q))})'>编辑</button>
+      <button class="btn sm danger" onclick="del('${q.id}')">删除</button>
+    </td>
+  </tr>`).join('');
+  const pages = Math.max(1, Math.ceil(total / 20));
+  document.getElementById('pager').innerHTML = pages > 1
+    ? `第 ${page}/${pages} 页 <button class="btn sm ghost" ${page <= 1 ? 'disabled' : ''} onclick="page--;load()">上一页</button>
+       <button class="btn sm ghost" ${page >= pages ? 'disabled' : ''} onclick="page++;load()">下一页</button>` : '';
+}
+
+function fmtAnswer(q) {
+  if (q.type === 'multiple') return (q.answer || []).join('、');
+  if (q.type === 'fill') return (q.answer || []).join(' | ');
+  return String(q.answer);
+}
+
+// ---------- 编辑器 ----------
+function openEditor(qJson) {
+  const q = qJson ? JSON.parse(qJson) : null;
+  editId = q ? q.id : null;
+  document.getElementById('modalTitle').textContent = q ? '编辑题目' : '新增题目';
+  eSubject.value = q ? q.subject : '';
+  eType.value = q ? q.type : 'single';
+  eScore.value = q ? q.score : 5;
+  eDiff.value = q ? q.difficulty : 3;
+  eContent.value = q ? q.content : '';
+  eAnalysis.value = q ? (q.analysis || '') : '';
+  renderOptions(q ? q.options : null);
+  renderAnswerEditor(q ? q.answer : null);
+  document.getElementById('mask').classList.add('show');
+}
+function closeEditor() { document.getElementById('mask').classList.remove('show'); }
+
+function getOptions() {
+  return [...document.querySelectorAll('#optList input')].map(i => i.value.trim()).filter(Boolean);
+}
+
+function renderOptions(opts) {
+  const type = eType.value;
+  const need = type === 'single' || type === 'multiple';
+  document.getElementById('optField').style.display = need ? 'block' : 'none';
+  if (!need) return;
+  const list = opts && opts.length ? opts : ['', '', '', ''];
+  document.getElementById('optList').innerHTML = list.map((o, i) =>
+    `<div style="display:flex;gap:8px;margin-bottom:6px;align-items:center;">
+      <b class="opt-letter">${String.fromCharCode(65 + i)}.</b>
+      <input type="text" style="flex:1;" value="${esc(o)}">
+      <button class="btn sm ghost" onclick="this.parentNode.remove();renderAnswerEditor()">删除</button>
+    </div>`).join('');
+}
+function addOption() {
+  const n = document.querySelectorAll('#optList input').length;
+  if (n >= 8) return toast('最多 8 个选项', true);
+  const div = document.createElement('div');
+  div.style.cssText = 'display:flex;gap:8px;margin-bottom:6px;align-items:center;';
+  div.innerHTML = `<b class="opt-letter">${String.fromCharCode(65 + n)}.</b>
+    <input type="text" style="flex:1;">
+    <button class="btn sm ghost" onclick="this.parentNode.remove();renderAnswerEditor()">删除</button>`;
+  document.getElementById('optList').appendChild(div);
+}
+
+function onTypeChange() {
+  renderOptions(null);
+  renderAnswerEditor();
+}
+
+function renderAnswerEditor(ans) {
+  const type = eType.value;
+  const el = document.getElementById('ansEditor');
+  const letters = () => [...document.querySelectorAll('#optList input')].map((_, i) => String.fromCharCode(65 + i));
+  if (type === 'single') {
+    el.innerHTML = letters().map(L =>
+      `<label class="opt-label" style="margin-right:14px;"><input type="radio" name="ans" value="${L}"> ${L}</label>`).join('');
+    if (typeof ans === 'string') { const r = el.querySelector(`input[value="${ans}"]`); if (r) r.checked = true; }
+  } else if (type === 'multiple') {
+    el.innerHTML = letters().map(L =>
+      `<label class="opt-label" style="margin-right:14px;"><input type="checkbox" value="${L}"> ${L}</label>`).join('');
+    if (Array.isArray(ans)) ans.forEach(L => { const c = el.querySelector(`input[value="${L}"]`); if (c) c.checked = true; });
+  } else if (type === 'judge') {
+    el.innerHTML = `<select id="ansJudge"><option>对</option><option>错</option></select>`;
+    if (ans) document.getElementById('ansJudge').value = String(ans);
+  } else if (type === 'fill') {
+    el.innerHTML = `<textarea id="ansFill" rows="2" placeholder="每行一个空的答案；同一空多种可接受写法用 | 分隔，如： Alice|爱丽丝"></textarea>`;
+    if (ans) document.getElementById('ansFill').value = (Array.isArray(ans) ? ans : [ans]).join('\n');
+  } else {
+    el.innerHTML = `<textarea id="ansText" rows="3" placeholder="参考答案（评分要点可写入下方解析）"></textarea>`;
+    if (ans) document.getElementById('ansText').value = String(ans);
+  }
+}
+
+function gatherAnswer() {
+  const type = eType.value;
+  if (type === 'single') {
+    const r = document.querySelector('#ansEditor input[type=radio]:checked');
+    return r ? r.value : '';
+  }
+  if (type === 'multiple') {
+    return [...document.querySelectorAll('#ansEditor input[type=checkbox]:checked')].map(c => c.value);
+  }
+  if (type === 'judge') return document.getElementById('ansJudge').value;
+  if (type === 'fill') {
+    return document.getElementById('ansFill').value.split('\n').map(s => s.trim()).filter(Boolean);
+  }
+  return document.getElementById('ansText').value.trim();
+}
+
+async function saveQuestion() {
+  const data = {
+    subject: eSubject.value.trim(),
+    type: eType.value,
+    content: eContent.value.trim(),
+    score: Number(eScore.value) || 5,
+    difficulty: Number(eDiff.value) || 3,
+    analysis: eAnalysis.value.trim(),
+    answer: gatherAnswer()
+  };
+  if (eType.value === 'single' || eType.value === 'multiple') data.options = getOptions();
+  try {
+    if (editId) { await api('/questions/' + editId, { method: 'PUT', body: data }); toast('已保存'); }
+    else { await api('/questions', { method: 'POST', body: data }); toast('题目已入库'); }
+    closeEditor(); load();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function del(id) {
+  if (!confirm('确定删除这道题？')) return;
+  try { await api('/questions/' + id, { method: 'DELETE' }); toast('已删除'); load(); }
+  catch (e) { toast(e.message, true); }
+}
+
+load().catch(e => toast(e.message, true));
+</script>
+</body>
+</html>

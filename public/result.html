@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>考试结果 - 考试系统</title>
+<link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+<nav class="topnav no-print">
+  <a class="brand" href="/">考试系统</a>
+  <a href="/">首页</a>
+  <a href="/bank.html">题库</a>
+  <a href="/create.html">AI 组卷</a>
+  <a href="/history.html" class="active">考试历史</a>
+  <a href="/wrong.html">错题本</a>
+</nav>
+<div class="container narrow">
+  <div class="toolbar" style="display:flex;justify-content:flex-end;gap:8px;margin-bottom:10px;">
+    <button class="btn ghost sm" onclick="window.print()">打印成绩单</button>
+    <a class="btn ghost sm" href="/wrong.html">去错题本</a>
+    <button class="btn success sm" id="retakeBtn" style="display:none;" onclick="retakeExam()">再考一次</button>
+  </div>
+  <div id="waitBanner" class="wait-banner" style="display:none;"></div>
+
+  <div class="paper" id="paper" style="width:auto;max-width:100%;">
+    <div class="score-hero">
+      <div id="rTitle" style="font-family:'KaiTi',serif;font-size:22px;margin-bottom:4px;">加载中…</div>
+      <div class="big" id="rScore">--</div>
+      <div class="sub" id="rSub"></div>
+    </div>
+    <div class="score-hero" id="rBreakdown" style="padding-top:0;"></div>
+    <div id="rItems"></div>
+  </div>
+</div>
+
+<script src="/js/api.js"></script>
+<script>
+const examId = decodeURIComponent(location.pathname.split('/').pop() || '') || new URLSearchParams(location.search).get('id');
+
+async function init() {
+  const d = await api('/exams/' + encodeURIComponent(examId));
+  const { exam, paper, items } = d;
+  document.getElementById('retakeBtn').style.display = 'inline-block';
+  window.__retake = { paperId: paper.id, studentName: exam.student_name };
+  document.getElementById('rTitle').textContent = paper.title + ' · 成绩单';
+  const graded = exam.status === 'graded';
+  document.getElementById('rScore').innerHTML = graded
+    ? `${exam.total_score}<small> / ${paper.total_score}</small>`
+    : '--';
+  document.getElementById('rSub').textContent =
+    `姓名：${exam.student_name}　用时：${fmtDuration(exam.total_time)}　提交时间：${exam.submitted_at || '-'}`;
+  document.getElementById('rBreakdown').innerHTML = graded
+    ? `<div class="sub">客观题 ${exam.objective_score} 分　·　主观题 ${exam.subjective_score} 分</div>`
+    : '';
+
+  const wb = document.getElementById('waitBanner');
+  if (!graded) {
+    wb.style.display = 'block';
+    wb.innerHTML = paper.source === 'mcp'
+      ? '试卷已完成答题，本卷由外部系统生成，等待外部 agent 通过 MCP 调用 grade_paper 判卷。'
+      : '试卷已完成答题，判卷进行中，请稍后刷新本页。';
+  }
+
+  let no = 0, lastType = null, html = '';
+  for (const it of items) {
+    if (it.type !== lastType) {
+      html += `<div class="sect-title">${TYPE_LABEL[it.type]}</div>`;
+      lastType = it.type;
+    }
+    no++;
+    const cls = it.correct === true ? 'ok' : (it.score > 0 ? 'part' : (it.score === 0 ? 'bad' : ''));
+    const scoreTxt = it.score == null ? '未判' : `${it.score} / ${it.maxScore} 分`;
+    html += `<div class="result-item ${cls}">
+      <div class="head">
+        <div><b>${no}.</b> ${esc(it.content)}</div>
+        <span class="badge ${it.correct === true ? 'green' : (it.score > 0 ? 'orange' : (it.score === 0 ? 'red' : 'gray'))}">${scoreTxt}</span>
+      </div>
+      ${it.options ? `<div style="color:#556;font-size:13.5px;margin-top:4px;">${it.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${esc(o)}`).join('　')}</div>` : ''}
+      <div class="ansline">你的答案：<b class="${it.correct === false ? 'bad' : 'ok'}">${esc(it.studentAnswerText)}</b>
+        ／ 正确答案：<b class="ok">${esc(it.referenceAnswer)}</b>
+        ／ 用时：${fmtDuration(it.timeSpent)}</div>
+      ${it.reason ? `<div class="reason-box"><b>评语：</b>${esc(it.reason)}</div>` : ''}
+      ${it.analysis && it.correct === false ? `<div class="reason-box"><b>解析：</b>${esc(it.analysis)}</div>` : ''}
+    </div>`;
+  }
+  document.getElementById('rItems').innerHTML = html;
+  document.title = (exam.student_name || '') + ' ' + paper.title + ' 成绩单';
+}
+
+// 再考一次：开启一次全新考试后跳到答题页（历史成绩保留）
+async function retakeExam() {
+  const t = window.__retake;
+  if (!t) return;
+  if (!confirm('重新考试将开始一次全新的作答，之前的考试历史仍会保留。确认重新考试？')) return;
+  try {
+    await api('/exams', { method: 'POST', body: { paperId: t.paperId, studentName: t.studentName, retake: true } });
+    location.href = '/exam/' + encodeURIComponent(t.paperId);
+  } catch (e) { toast(e.message, true); }
+}
+
+init().catch(e => {
+  document.getElementById('rTitle').textContent = '加载失败';
+  toast(e.message, true);
+});
+</script>
+</body>
+</html>
